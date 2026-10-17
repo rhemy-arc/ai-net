@@ -57,6 +57,39 @@ All error responses return a standardized JSON error envelope:
 | `503 Service Unavailable` | `STELLAR_UNAVAILABLE` | Stellar Horizon or RPC unavailable | Retry after a short delay |
 | `504 Gateway Timeout` | `PROVIDER_TIMEOUT` | Upstream provider timed out | Retry with backoff |
 
+### 2.2 Rate Limit Headers
+
+Every rate-limited route (public, authenticated and admin groups) returns the following headers on **every** response, not just on `429`, so clients can pace themselves instead of guessing:
+
+| Header | Sent on | Value |
+|---|---|---|
+| `X-RateLimit-Limit` | All responses | Maximum requests allowed in the current window |
+| `X-RateLimit-Remaining` | All responses | Requests left in the current window (`0` once exhausted) |
+| `X-RateLimit-Reset` | All responses | Unix time, in **epoch seconds**, when the window frees up |
+| `Retry-After` | `429` only | Seconds to wait before retrying (always `>= 1`) |
+
+When more than one limiter applies to a request (for example the app-wide limiter and a route-group limiter), the headers describe whichever one has the fewest requests remaining.
+
+| Group | Routes | Default budget | Env overrides |
+|---|---|---|---|
+| Public | `/health`, `/api/stats`, `/api/agents` (reads), cost endpoints | 120 / 60s | `RATE_LIMIT_PUBLIC_MAX_REQUESTS`, `RATE_LIMIT_PUBLIC_WINDOW_MS` |
+| Authenticated | `/api/tasks` | 30 / 60s | `RATE_LIMIT_AUTHED_MAX_REQUESTS`, `RATE_LIMIT_AUTHED_WINDOW_MS` |
+| Admin | `/api/admin/*`, `/migrations` | 20 / 60s | `RATE_LIMIT_ADMIN_MAX_REQUESTS`, `RATE_LIMIT_ADMIN_WINDOW_MS` |
+
+Example `429` response:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 17
+X-RateLimit-Limit: 30
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1793875217
+
+{ "error": { "message": "Too many requests", "code": "RATE_LIMITED" } }
+```
+
+Recommended client behaviour: once `X-RateLimit-Remaining` reaches `0`, hold requests until `X-RateLimit-Reset`. On a `429`, wait `Retry-After` seconds before retrying.
+
 ---
 
 ## 3. Endpoints Reference

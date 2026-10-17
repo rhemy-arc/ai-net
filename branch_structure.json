@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/rate-limit-headers",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/rate-limit-headers": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/rate-limit-headers",
+    "origin"
+  ]
+}
