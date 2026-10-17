@@ -56,13 +56,23 @@ interface Window {
  *  - `X-RateLimit-Reset`     — Unix timestamp (seconds) when the window resets
  *
  * On 429 responses `Retry-After` is also set (seconds until reset).
+ *
+ * Several limiters can apply to one request (the app-wide limiter plus a
+ * route-group limiter). Unless `force` is set, headers already written by an
+ * earlier limiter are kept when they advertise fewer remaining requests, so
+ * clients always see the most restrictive budget that applies to them.
  */
 function setRateLimitHeaders(
   res: Response,
   limit: number,
   remaining: number,
   resetAtMs: number,
+  force = false,
 ): void {
+  const existing = Number(res.getHeader("X-RateLimit-Remaining"));
+  if (!force && Number.isFinite(existing) && existing < Math.max(0, remaining)) {
+    return;
+  }
   const resetSec = Math.ceil(resetAtMs / 1000);
   res.setHeader("X-RateLimit-Limit", String(limit));
   res.setHeader("X-RateLimit-Remaining", String(Math.max(0, remaining)));
@@ -105,7 +115,7 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
 
     if (win.timestamps.length >= maxRequests) {
       const retryAfter = Math.ceil((resetAtMs - now) / 1000);
-      setRateLimitHeaders(res, maxRequests, 0, resetAtMs);
+      setRateLimitHeaders(res, maxRequests, 0, resetAtMs, true);
       res.setHeader("Retry-After", String(retryAfter));
       res
         .status(429)
@@ -427,7 +437,11 @@ export function agentAuthFailureGuard(req: Request, res: Response, next: NextFun
     return;
   }
 
-  const retryAfter = Math.ceil(windowMs / 1000);
+  // The budget frees up as soon as the oldest recorded failure ages out.
+  const now = Date.now();
+  const resetAtMs = (timestamps[0] ?? now) + windowMs;
+  const retryAfter = Math.max(1, Math.ceil((resetAtMs - now) / 1000));
+  setRateLimitHeaders(res, maxFailures, 0, resetAtMs, true);
   res.setHeader("Retry-After", String(retryAfter));
   res.status(429).json({
     error: {

@@ -1,7 +1,6 @@
 node_modules/
 dist/
 target/
-.env
 *.js.map
 *.db
 *.db-shm
@@ -22,3 +21,4 @@ smart-contracts/testnet-farm-output/
 # Property test snapshots (auto-generated, large fixtures)
 **/test_snapshots/property_tests/
 
+config.bat
