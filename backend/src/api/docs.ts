@@ -74,9 +74,16 @@ Rate limit status is communicated via standard HTTP response headers:
 |---|---|
 | \`X-RateLimit-Limit\` | Maximum requests allowed within the current time window |
 | \`X-RateLimit-Remaining\` | Number of requests remaining in the current window |
-| \`X-RateLimit-Reset\` | Time (epoch seconds or ms) when the current window resets |
+| \`X-RateLimit-Reset\` | Unix time (epoch seconds) when the current window resets |
+| \`Retry-After\` | Seconds to wait before retrying — sent on \`429\` responses only |
 
-When rate limits are exceeded, the API returns \`429 Too Many Requests\` with an error payload explaining the retry delay.
+The \`X-RateLimit-*\` headers are sent on every response from a rate-limited route
+(public, authenticated and admin groups alike), not only on \`429\`, so clients can back off
+before they are throttled. When more than one limiter applies to a request, the headers
+describe the most restrictive one.
+
+When rate limits are exceeded, the API returns \`429 Too Many Requests\` with a
+\`RATE_LIMITED\` error payload and a \`Retry-After\` header.
 
 ---
 
@@ -167,6 +174,10 @@ List endpoints support standardized query parameters:
           description: "The time at which the current rate limit window resets in UTC epoch seconds.",
           schema: { type: "integer", example: 1724601600 },
         },
+        "Retry-After": {
+          description: "Seconds to wait before retrying. Sent on every `429 Too Many Requests` response.",
+          schema: { type: "integer", minimum: 1, example: 42 },
+        },
         "X-Request-Id": {
           description: "Unique request identifier for distributed tracing and logging.",
           schema: { type: "string", example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" },
@@ -174,6 +185,22 @@ List endpoints support standardized query parameters:
         "X-API-Version": {
           description: "The negotiated API version used to process the request.",
           schema: { type: "string", example: "1.0" },
+        },
+      },
+      responses: {
+        TooManyRequests: {
+          description: "Rate limit exceeded. Wait `Retry-After` seconds (or until `X-RateLimit-Reset`) before retrying.",
+          headers: {
+            "Retry-After": { $ref: "#/components/headers/Retry-After" },
+            "X-RateLimit-Limit": { $ref: "#/components/headers/X-RateLimit-Limit" },
+            "X-RateLimit-Remaining": { $ref: "#/components/headers/X-RateLimit-Remaining" },
+            "X-RateLimit-Reset": { $ref: "#/components/headers/X-RateLimit-Reset" },
+          },
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RateLimitError" },
+            },
+          },
         },
       },
       schemas: {
@@ -793,7 +820,55 @@ List endpoints support standardized query parameters:
   ],
 };
 
-export const openapiSpec: Record<string, any> = swaggerJsdoc(openapiOptions);
+const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options"] as const;
+
+/**
+ * Fresh objects on every call: sharing one instance across operations makes
+ * `YAML.stringify` emit anchors/aliases, which bloats /openapi.yaml and trips
+ * the parser's alias-count guard.
+ */
+const rateLimitHeaderRefs = (): Record<string, { $ref: string }> => ({
+  "X-RateLimit-Limit": { $ref: "#/components/headers/X-RateLimit-Limit" },
+  "X-RateLimit-Remaining": { $ref: "#/components/headers/X-RateLimit-Remaining" },
+  "X-RateLimit-Reset": { $ref: "#/components/headers/X-RateLimit-Reset" },
+});
+
+/**
+ * Every HTTP route sits behind at least one limiter (the app-wide limiter plus
+ * the public / authed / admin group limiters), so rather than repeating the
+ * header block in each JSDoc annotation the spec is decorated once here:
+ *  - every response advertises the `X-RateLimit-*` headers; and
+ *  - every operation documents a `429` carrying `Retry-After`, reusing
+ *    `#/components/responses/TooManyRequests` when the route has none.
+ */
+export function withRateLimitHeaders(spec: Record<string, any>): Record<string, any> {
+  for (const pathItem of Object.values<any>(spec.paths ?? {})) {
+    for (const method of HTTP_METHODS) {
+      const operation = pathItem?.[method];
+      if (!operation) continue;
+      operation.responses ??= {};
+
+      for (const [status, response] of Object.entries<any>(operation.responses)) {
+        if (status === "429" || response?.$ref) continue;
+        response.headers = { ...rateLimitHeaderRefs(), ...response.headers };
+      }
+
+      const tooMany = operation.responses["429"];
+      if (!tooMany) {
+        operation.responses["429"] = { $ref: "#/components/responses/TooManyRequests" };
+      } else if (!tooMany.$ref) {
+        tooMany.headers = {
+          "Retry-After": { $ref: "#/components/headers/Retry-After" },
+          ...rateLimitHeaderRefs(),
+          ...tooMany.headers,
+        };
+      }
+    }
+  }
+  return spec;
+}
+
+export const openapiSpec: Record<string, any> = withRateLimitHeaders(swaggerJsdoc(openapiOptions));
 
 /**
  * Swagger UI interactive options enabling "Try it out" by default,
